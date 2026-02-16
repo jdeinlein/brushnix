@@ -1,5 +1,5 @@
 {
-  description = "Brush: 3D Reconstruction engine using Gaussian Splatting";
+  description = "Brush: 3D Reconstruction engine";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -11,17 +11,24 @@
     utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
-        pkgs = import nixpkgs {
-          inherit system overlays;
-        };
+        pkgs = import nixpkgs { inherit system overlays; };
 
-        # Rust Toolchain definieren (Brush benötigt Rust 1.88+)
+        # Rust Toolchain
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [ "rust-src" "rust-analyzer" ];
         };
 
-        # Notwendige Bibliotheken für wgpu / Grafik
-        runtimeDeps = with pkgs; [
+        # --- Dependencies ---
+        
+        # Common dependncies
+        commonNativeInputs = with pkgs; [
+          rustToolchain
+          pkg-config
+          cmake
+        ];
+
+        # Linux
+        linuxDeps = with pkgs; [
           vulkan-loader
           libxkbcommon
           wayland
@@ -31,51 +38,56 @@
           libxrandr
         ];
 
-        nativeBuildInputs = with pkgs; [
-          rustToolchain
-          pkg-config
-          makeWrapper
-          cmake # Falls C-Abhängigkeiten vorhanden sind
+        # macOS
+        darwinDeps = [
+          pkgs.apple-sdk
+          pkgs.libiconv
         ];
 
-        buildInputs = runtimeDeps;
+        nativeBuildInputs = commonNativeInputs ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.makeWrapper ];
+        buildInputs = if pkgs.stdenv.isDarwin then darwinDeps else linuxDeps;
 
       in
       {
-        # Entwicklungsumgebung
         devShells.default = pkgs.mkShell {
           inherit nativeBuildInputs buildInputs;
 
-          # LD_LIBRARY_PATH ist für wgpu/Vulkan unter Linux oft notwendig
           shellHook = ''
-            export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath runtimeDeps}:$LD_LIBRARY_PATH
+            ${if pkgs.stdenv.isDarwin then ''
+              # macOS: SDK paths
+              export SDKROOT=$(xcrun --show-sdk-path)
+            '' else ''
+              # Linux: Library paths
+              export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath linuxDeps}:$LD_LIBRARY_PATH
+            ''}
+            echo "Brush Dev Shell für ${system} geladen."
           '';
         };
 
-        # Paket-Definition (nix build)
         packages.default = pkgs.rustPlatform.buildRustPackage {
           pname = "brush";
-          version = "0.3.0"; # Version anpassen
-
+          version = "0.3.0";
           src = ./.;
 
-          # cargoLock muss vorhanden sein. Falls nicht, 'cargoHash' nutzen.
-          cargoLock = {
-            lockFile = ./Cargo.lock;
-          };
+          cargoLock = { lockFile = ./Cargo.lock; };
 
           inherit nativeBuildInputs buildInputs;
 
-          # Nach dem Bauen die Library-Pfade für die Binary setzen
-          postInstall = ''
-            wrapProgram $out/bin/brush \
-              --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath runtimeDeps}
+          preConfigure = pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+            export SDKROOT=$(xcrun --show-sdk-path)
           '';
+
+          postInstall = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+            wrapProgram $out/bin/brush \
+              --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath linuxDeps}
+          '';
+
+          doCheck = false;
 
           meta = with pkgs.lib; {
             description = "3D Reconstruction engine using Gaussian splatting";
             homepage = "https://github.com/ArthurBrussee/brush";
-            license = licenses.asl20;
+            platforms = platforms.linux ++ platforms.darwin;
           };
         };
       }
